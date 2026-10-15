@@ -3,7 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { verifyPassword } from "@/lib/crypto";
 import { createSession, sessionCookieConfig, getClientIp, enforceLimit } from "@/lib/session";
-import type { MeResponse } from "@/lib/types";
+import type { AuthResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -51,9 +51,10 @@ export async function POST(req: Request) {
   }
 
   const token = await createSession(user.id);
-  const res = NextResponse.json<MeResponse>({
+  const res = NextResponse.json<AuthResponse>({
     user: { id: user.id, email: user.email },
     boxId: user.boxId,
+    token, // client stores this in localStorage + sends as Bearer
   });
   res.cookies.set(sessionCookieConfig().name, token, sessionCookieConfig());
   return res;

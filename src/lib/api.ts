@@ -1,8 +1,11 @@
 import type {
+  AuthResponse,
   MeResponse,
   LetterListItem,
   LetterDetail,
 } from "@/lib/types";
+
+const TOKEN_KEY = "pobox_token";
 
 /** Error thrown by the api client; carries the server's message + status. */
 export class ApiError extends Error {
@@ -14,14 +17,39 @@ export class ApiError extends Error {
   }
 }
 
+/** localStorage-backed session token (survives cross-origin preview iframes
+ *  where httpOnly cookies can't be set). Read on every request. */
+export function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getStoredToken();
+  const mergedHeaders: Record<string, string> = {
+    accept: "application/json",
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (token) mergedHeaders["authorization"] = `Bearer ${token}`;
+
   const res = await fetch(path, {
     credentials: "same-origin",
     ...init,
-    headers: {
-      accept: "application/json",
-      ...(init?.headers || {}),
-    },
+    headers: mergedHeaders,
   });
   if (res.status === 204) return undefined as unknown as T;
   const text = await res.text();
@@ -47,26 +75,34 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   me: () => apiFetch<MeResponse>("/api/auth/me"),
-  signup: (email: string, password: string) =>
-    apiFetch<MeResponse>("/api/auth/signup", {
+  signup: async (email: string, password: string) => {
+    const r = await apiFetch<AuthResponse>("/api/auth/signup", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email, password }),
-    }),
-  login: (email: string, password: string) =>
-    apiFetch<MeResponse>("/api/auth/login", {
+    });
+    setStoredToken(r.token);
+    return r;
+  },
+  login: async (email: string, password: string) => {
+    const r = await apiFetch<AuthResponse>("/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email, password }),
-    }),
-  logout: () =>
-    apiFetch<void>("/api/auth/logout", { method: "POST" }),
-  inbox: () =>
-    apiFetch<{ letters: LetterListItem[] }>("/api/letters?box=inbox"),
-  sent: () =>
-    apiFetch<{ letters: LetterListItem[] }>("/api/letters?box=sent"),
-  letter: (id: string) =>
-    apiFetch<{ letter: LetterDetail }>(`/api/letters/${id}`),
+    });
+    setStoredToken(r.token);
+    return r;
+  },
+  logout: async () => {
+    try {
+      await apiFetch<void>("/api/auth/logout", { method: "POST" });
+    } finally {
+      setStoredToken(null);
+    }
+  },
+  inbox: () => apiFetch<{ letters: LetterListItem[] }>("/api/letters?box=inbox"),
+  sent: () => apiFetch<{ letters: LetterListItem[] }>("/api/letters?box=sent"),
+  letter: (id: string) => apiFetch<{ letter: LetterDetail }>(`/api/letters/${id}`),
   open: (id: string) =>
     apiFetch<{ letter: LetterDetail }>(`/api/letters/${id}`, {
       method: "PATCH",
@@ -78,7 +114,6 @@ export const api = {
     fd.set("recipientBoxId", recipientBoxId);
     fd.set("body", body);
     for (const f of files) fd.append("files", f);
-    // Don't set content-type — the browser sets the multipart boundary.
     return apiFetch<{ letter: LetterDetail }>("/api/letters", {
       method: "POST",
       body: fd,
@@ -86,7 +121,11 @@ export const api = {
   },
 };
 
-/** Build the download URL for an attachment (auth-checked server-side). */
 export function attachmentUrl(id: string) {
-  return `/api/attachments/${id}`;
+  const base = `/api/attachments/${id}`;
+  // <a download> can't set custom headers, so the session token rides in the
+  // query string (validated server-side). Required for the preview iframe,
+  // where the cookie may be blocked.
+  const token = getStoredToken();
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }

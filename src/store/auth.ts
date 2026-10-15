@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api } from "@/lib/api";
+import { api, getStoredToken, setStoredToken } from "@/lib/api";
 import type { MeResponse } from "@/lib/types";
 
 export type AuthStatus = "loading" | "authed" | "unauthed";
@@ -21,25 +21,39 @@ export const useAuth = create<AuthState>((set) => ({
   me: null,
   justSignedUpBoxId: null,
   init: async () => {
-    try {
-      const me = await api.me();
-      set({ status: "authed", me });
-    } catch {
-      set({ status: "unauthed", me: null });
+    // If we have a stored token, verify it; if it's dead, clear it.
+    if (getStoredToken()) {
+      try {
+        const me = await api.me();
+        set({ status: "authed", me });
+        return;
+      } catch {
+        setStoredToken(null);
+      }
     }
+    set({ status: "unauthed", me: null });
   },
   login: async (email, password) => {
-    const me = await api.login(email, password);
-    set({ status: "authed", me, justSignedUpBoxId: null });
+    const r = await api.login(email, password);
+    set({
+      status: "authed",
+      me: { user: r.user, boxId: r.boxId },
+      justSignedUpBoxId: null,
+    });
   },
   signup: async (email, password) => {
-    const me = await api.signup(email, password);
-    set({ status: "authed", me, justSignedUpBoxId: me.boxId });
+    const r = await api.signup(email, password);
+    set({
+      status: "authed",
+      me: { user: r.user, boxId: r.boxId },
+      justSignedUpBoxId: r.boxId,
+    });
   },
   logout: async () => {
     try {
       await api.logout();
     } finally {
+      setStoredToken(null);
       set({ status: "unauthed", me: null, justSignedUpBoxId: null });
     }
   },

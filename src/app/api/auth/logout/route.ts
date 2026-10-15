@@ -6,9 +6,18 @@ import { SESSION_COOKIE } from "@/lib/session";
 
 export const runtime = "nodejs";
 
-export async function POST() {
-  const store = await cookies();
-  const token = store.get(SESSION_COOKIE)?.value;
+export async function POST(req: Request) {
+  // Read the token from the Authorization header (primary) or the cookie.
+  let token: string | null = null;
+  const auth = req.headers.get("authorization");
+  if (auth) {
+    const lower = auth.toLowerCase();
+    if (lower.startsWith("bearer ")) token = auth.slice(7).trim();
+  }
+  if (!token) {
+    const store = await cookies();
+    token = store.get(SESSION_COOKIE)?.value ?? null;
+  }
   if (token) {
     const tokenHash = hashToken(token);
     try {
@@ -22,7 +31,8 @@ export async function POST() {
     path: "/",
     maxAge: 0,
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: "none",
+    secure: true,
   });
   return res;
 }

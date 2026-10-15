@@ -1,21 +1,26 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getUser } from "@/lib/session";
+import { getUser, getUserByToken } from "@/lib/session";
 import { boxIdEquals } from "@/lib/box";
 import { resolveStoragePath } from "@/lib/uploads";
 import { promises as fs } from "fs";
 
 export const runtime = "nodejs";
 
-// GET /api/attachments/[id]
+// GET /api/attachments/[id]?token=<session>
 // Streams the file. Caller must be the sender or the recipient of the
 // letter this attachment belongs to. Recipients can only download arrived
 // attachments; senders can always re-download their own sent copy.
+// The token may come via ?token= (so <a download> works in the preview
+// iframe, where it can't set headers), the Bearer header, or the cookie.
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = await getUser();
+  const url = new URL(req.url);
+  const queryToken = url.searchParams.get("token");
+  const auth =
+    (queryToken ? await getUserByToken(queryToken) : null) ?? (await getUser());
   if (!auth) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }

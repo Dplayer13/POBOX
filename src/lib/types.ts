@@ -5,6 +5,16 @@ export interface UserPublic {
   email: string;
 }
 
+/** Returned by signup + login. Carries the raw session token so the client
+ *  can store it in localStorage and send it as a Bearer header (cookies don't
+ *  survive cross-origin preview iframes). */
+export interface AuthResponse {
+  user: UserPublic;
+  boxId: string;
+  token: string;
+}
+
+/** Returned by GET /api/auth/me — no token (client already has it). */
 export interface MeResponse {
   user: UserPublic;
   boxId: string;
@@ -15,8 +25,6 @@ export interface AttachmentPublic {
   filename: string;
   mimeType: string;
   size: number;
-  // storageKey is intentionally NOT exposed to the client; downloads resolve
-  // it server-side via /api/attachments/[id].
 }
 
 export interface LetterListItem {

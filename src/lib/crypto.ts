@@ -17,7 +17,15 @@ export function hashPassword(password: string): string {
     r: SCRYPT_R,
     p: SCRYPT_P,
   });
-  return `scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.toString("hex")}${hash.toString("hex")}`;
+  // Format: scrypt$N$r$p$saltHex$hashHex  (fields joined by $)
+  return [
+    "scrypt",
+    SCRYPT_N,
+    SCRYPT_R,
+    SCRYPT_P,
+    salt.toString("hex"),
+    hash.toString("hex"),
+  ].join("$");
 }
 
 export function verifyPassword(password: string, stored: string): boolean {

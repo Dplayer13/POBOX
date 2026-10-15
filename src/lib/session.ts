@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { db } from "@/lib/db";
 import { randomToken, hashToken } from "@/lib/crypto";
 import type { UserPublic } from "@/lib/types";
@@ -11,7 +11,7 @@ export interface AuthUser {
   boxId: string;
 }
 
-/** Create a new session row and return the raw token (goes into the cookie). */
+/** Create a new session row and return the raw token. */
 export async function createSession(userId: string): Promise<string> {
   const token = randomToken();
   const tokenHash = hashToken(token);
@@ -30,14 +30,29 @@ export async function destroySessionByToken(token: string): Promise<void> {
 }
 
 /**
- * Resolve the authenticated user from the request cookie.
- * Returns null if no session, the session is expired, or the user is gone.
- * Expired sessions are pruned on read.
+ * Read the session token from the request. Prefer the `Authorization:
+ * Bearer` header (the client stores the token in localStorage and sends it
+ * here — this survives cross-origin preview iframes where cookies are
+ * blocked). Fall back to the httpOnly cookie for any same-origin/SSR path.
  */
-export async function getUser(): Promise<AuthUser | null> {
+async function getRequestToken(): Promise<string | null> {
+  const h = await headers();
+  const auth = h.get("authorization");
+  if (auth) {
+    const lower = auth.toLowerCase();
+    if (lower.startsWith("bearer ")) {
+      const t = auth.slice(7).trim();
+      if (t) return t;
+    }
+  }
   const store = await cookies();
-  const token = store.get(SESSION_COOKIE)?.value;
-  if (!token) return null;
+  return store.get(SESSION_COOKIE)?.value ?? null;
+}
+
+/** Resolve a user from an explicit token (used by the attachment download
+ *  route, which receives the token via ?token= because <a download> can't
+ *  set custom headers). Prunes expired sessions. */
+export async function getUserByToken(token: string): Promise<AuthUser | null> {
   const tokenHash = hashToken(token);
   const session = await db.session.findUnique({
     where: { tokenHash },
@@ -54,13 +69,26 @@ export async function getUser(): Promise<AuthUser | null> {
   };
 }
 
+/**
+ * Resolve the authenticated user from the request (Bearer header or cookie).
+ * Returns null if no/invalid/expired session. Expired sessions are pruned.
+ */
+export async function getUser(): Promise<AuthUser | null> {
+  const token = await getRequestToken();
+  if (!token) return null;
+  return getUserByToken(token);
+}
+
+/** Cookie config — SameSite=None + Secure so it can ALSO be set in third-party
+ *  iframe contexts when the browser allows it (defense in depth; the Bearer
+ *  header is the primary auth path). */
 export function sessionCookieConfig() {
   return {
     name: SESSION_COOKIE,
     httpOnly: true,
-    sameSite: "lax" as const,
+    sameSite: "none" as const,
     path: "/",
-    secure: process.env.NODE_ENV === "production",
+    secure: true,
     maxAge: SESSION_MAX_AGE_SEC,
   };
 }
