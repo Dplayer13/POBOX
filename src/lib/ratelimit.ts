@@ -55,10 +55,12 @@ export function rlKey(action: string, id: string) {
   return `${action}:${id}`;
 }
 
-// Sensible shared presets (exported so callers stay consistent).
+// Rate-limit presets. The box-id space (30^8 ≈ 656 billion) makes blind
+// guessing infeasible on its own, so these are defense-in-depth. Kept generous
+// for a shared preview IP where one person may be testing many flows.
 export const LIMITS = {
-  signup: { max: 5, windowMs: 60 * 60 * 1000 }, // 5 / hour / ip
-  login: { max: 10, windowMs: 60 * 60 * 1000 }, // 10 / hour / ip
-  send: { max: 20, windowMs: 60 * 60 * 1000 }, // 20 / hour / user
-  upload: { max: 30, windowMs: 60 * 60 * 1000 }, // 30 / hour / user
+  signup: { max: 50, windowMs: 60 * 60 * 1000 }, // 50 / hour / ip
+  login: { max: 100, windowMs: 60 * 60 * 1000 }, // 100 / hour / ip
+  send: { max: 200, windowMs: 60 * 60 * 1000 }, // 200 / hour / user
+  upload: { max: 200, windowMs: 60 * 60 * 1000 }, // 200 / hour / user
 } as const;
