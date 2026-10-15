@@ -1,0 +1,79 @@
+// Virtual PO Box — letter app schema
+// Adapted to the sandbox: SQLite instead of Postgres. The data model matches
+// the plan (users / boxes / letters / attachments) so it can be promoted to
+// Postgres later without a rewrite.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  // scrypt hash, format: "scrypt$N$r$p$saltHex$hashHex"
+  passwordHash String
+  // Anonymous address people send letters to, e.g. "box-7k2m9q4x".
+  // Long unguessable code (see lib/box.ts). Shown once on signup; the owner
+  // can always re-read their own boxId from the dashboard.
+  boxId        String    @unique
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+  // A user only ever owns ONE box, but letters reference boxId strings
+  // (not userId) so a letter from/to a box stays addressable even if the
+  // user account is deleted. We still enforce ownership server-side.
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // 32-byte random token, hex-encoded. Stored hashed (sha256) so a DB leak
+  // can't be replayed. The raw token lives only in the httpOnly cookie.
+  tokenHash String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([userId])
+}
+
+model Letter {
+  id             String      @id @default(cuid())
+  // Box IDs are strings, not FKs, so a letter addressed to a box that has
+  // no account (or whose account was deleted) still resolves cleanly.
+  // We NEVER confirm box existence to a sender.
+  senderBoxId    String
+  recipientBoxId String
+  // Plain text body for v1. Designed so it can later hold ciphertext
+  // (e.g. "enc:v1:...") without a schema change.
+  body           String
+  sentAt         DateTime    @default(now())
+  // When the letter "arrives" at the recipient's box. Before this time the
+  // letter is "in transit" and not yet seal-openable by the recipient.
+  deliverAt      DateTime
+  // Set when the recipient first opens the letter. Null = sealed/unopened.
+  openedAt       DateTime?
+  attachments    Attachment[]
+
+  @@index([recipientBoxId])
+  @@index([senderBoxId])
+}
+
+model Attachment {
+  id         String   @id @default(cuid())
+  letterId   String
+  letter     Letter   @relation(fields: [letterId], references: [id], onDelete: Cascade)
+  // Original name for display only.
+  filename   String
+  mimeType   String
+  size       Int
+  // Random storage key under /uploads. Never the original name.
+  storageKey String
+  createdAt  DateTime @default(now())
+
+  @@index([letterId])
+}
