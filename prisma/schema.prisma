@@ -1,15 +1,15 @@
 // Virtual PO Box — letter app schema
-// Adapted to the sandbox: SQLite instead of Postgres. The data model matches
-// the plan (users / boxes / letters / attachments) so it can be promoted to
-// Postgres later without a rewrite.
+// Uses Supabase Postgres in production, keeping the same data model as the
+// original plan while allowing local SQLite during dev if needed.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
