@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { get } from "@vercel/blob";
 import { db } from "@/lib/db";
 import { getUser, getUserByToken } from "@/lib/session";
 import { boxIdEquals } from "@/lib/box";
-import { resolveStoragePath } from "@/lib/uploads";
+import { isBlobStorageKey, resolveStoragePath } from "@/lib/uploads";
 import { promises as fs } from "fs";
 
 export const runtime = "nodejs";
@@ -42,7 +43,24 @@ export async function GET(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  const safeName = attachment.filename.replace(/[^\w.\-]+/g, "_");
   const p = resolveStoragePath(attachment.storageKey);
+  if (!p && isBlobStorageKey(attachment.storageKey)) {
+    const blob = await get(attachment.storageKey, { access: "private" });
+    if (!blob || blob.statusCode !== 200) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    return new NextResponse(blob.stream, {
+      status: 200,
+      headers: {
+        "content-type": attachment.mimeType || "application/octet-stream",
+        "content-length": String(blob.blob.size),
+        "content-disposition": `attachment; filename="${safeName}"`,
+        "cache-control": "no-store, max-age=0",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
   if (!p) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
@@ -53,10 +71,6 @@ export async function GET(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Force download with the original filename; never render inline (the plan
-  // says "never open or render them on the server" and we keep the bucket
-  // private, so the browser shouldn't try to render it either).
-  const safeName = attachment.filename.replace(/[^\w.\-]+/g, "_");
   return new NextResponse(buf as unknown as BodyInit, {
     status: 200,
     headers: {

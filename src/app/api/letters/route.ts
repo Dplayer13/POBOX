@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getUser, getClientIp, enforceLimit } from "@/lib/session";
 import { isValidBoxId } from "@/lib/box";
+import { BlobNotFoundError, head } from "@vercel/blob";
 import {
-  validateFile,
-  persistFile,
   deleteFile,
+  isBlobStorageKeyForBox,
   MAX_BODY_CHARS,
+  MAX_FILE_BYTES,
   MAX_FILES_PER_LETTER,
+  validateFile,
 } from "@/lib/uploads";
 import { toListItem, toDetail, DELIVERY_DELAY_MS } from "@/lib/letter";
 import type { LetterDetail, LetterListItem } from "@/lib/types";
@@ -50,9 +52,8 @@ export async function GET(req: Request) {
   }
 }
 
-// POST /api/letters  (multipart/form-data)
-// fields: recipientBoxId (string), body (string)
-// files:  up to 5 under field name "files"
+// POST /api/letters  (application/json)
+// Includes uploaded Blob pathnames; file bytes are sent directly to Blob storage.
 export async function POST(req: Request) {
   const auth = await getUser();
   if (!auth) {
@@ -61,18 +62,27 @@ export async function POST(req: Request) {
   const limited = enforceLimit("send", auth.boxId);
   if (!limited.ok) return limited.response;
 
-  let form: FormData;
+  let payload: unknown;
   try {
-    form = await req.formData();
+    payload = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Expected multipart form data." },
+      { error: "Expected JSON request data." },
       { status: 400 }
     );
   }
 
-  const recipientBoxIdRaw = String(form.get("recipientBoxId") ?? "").trim();
-  const bodyRaw = String(form.get("body") ?? "");
+  if (!payload || typeof payload !== "object") {
+    return NextResponse.json({ error: "Invalid request data." }, { status: 400 });
+  }
+  const data = payload as {
+    recipientBoxId?: unknown;
+    body?: unknown;
+    files?: unknown;
+  };
+  const recipientBoxIdRaw =
+    typeof data.recipientBoxId === "string" ? data.recipientBoxId.trim() : "";
+  const bodyRaw = typeof data.body === "string" ? data.body : "";
 
   if (!isValidBoxId(recipientBoxIdRaw)) {
     return NextResponse.json(
@@ -81,9 +91,10 @@ export async function POST(req: Request) {
     );
   }
   const body = bodyRaw.slice(0, MAX_BODY_CHARS);
-  // The plan allows letters that are just files; require at least one of
-  // body or attachment.
-  const fileEntries = form.getAll("files").filter((f): f is File => f instanceof File);
+  if (data.files !== undefined && !Array.isArray(data.files)) {
+    return NextResponse.json({ error: "Invalid attachment data." }, { status: 400 });
+  }
+  const fileEntries = Array.isArray(data.files) ? data.files : [];
   if (fileEntries.length > MAX_FILES_PER_LETTER) {
     return NextResponse.json(
       { error: `You can attach at most ${MAX_FILES_PER_LETTER} files per letter.` },
@@ -97,37 +108,76 @@ export async function POST(req: Request) {
     );
   }
 
-  // Validate + read every file into memory (≤10MB each, ≤5 files ⇒ ≤50MB).
-  // Production would stream to object storage; this is fine for the sandbox.
-  const staged: { bytes: Uint8Array; filename: string; mimeType: string; size: number }[] = [];
-  for (const f of fileEntries) {
-    const v = validateFile({ name: f.name, type: f.type, size: f.size });
-    if (!v.ok) {
-      return NextResponse.json({ error: `${f.name}: ${v.reason}` }, { status: 400 });
-    }
-    const ab = await f.arrayBuffer();
-    staged.push({
-      bytes: new Uint8Array(ab),
-      filename: f.name,
-      mimeType: v.mimeType,
-      size: f.size,
-    });
-  }
+  const staged: {
+    pathname: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+  }[] = [];
+  const ownedPaths: string[] = [];
+  const rejectWithCleanup = async (message: string) => {
+    await Promise.all(ownedPaths.map(deleteFile));
+    return NextResponse.json({ error: message }, { status: 400 });
+  };
 
-  // Write files to disk first, collecting storage keys.
-  const writtenKeys: string[] = [];
-  for (const s of staged) {
-    try {
-      const key = await persistFile(s.bytes);
-      writtenKeys.push(key);
-    } catch {
-      // Clean up any files we already wrote, then bail.
-      await Promise.all(writtenKeys.map(deleteFile));
-      return NextResponse.json(
-        { error: "We couldn't store one of your files. Please try again." },
-        { status: 500 }
+  for (const entry of fileEntries) {
+    if (!entry || typeof entry !== "object") {
+      return rejectWithCleanup("Invalid attachment data.");
+    }
+    const file = entry as {
+      pathname?: unknown;
+      filename?: unknown;
+      mimeType?: unknown;
+      size?: unknown;
+    };
+    if (
+      typeof file.pathname !== "string" ||
+      !isBlobStorageKeyForBox(file.pathname, auth.boxId)
+    ) {
+      return rejectWithCleanup("Invalid attachment path.");
+    }
+    ownedPaths.push(file.pathname);
+    if (
+      typeof file.filename !== "string" ||
+      typeof file.mimeType !== "string" ||
+      typeof file.size !== "number" ||
+      !Number.isInteger(file.size)
+    ) {
+      return rejectWithCleanup("Invalid attachment data.");
+    }
+
+    const validation = validateFile({
+      name: file.filename,
+      type: file.mimeType,
+      size: file.size,
+    });
+    if (!validation.ok || validation.mimeType !== file.mimeType) {
+      return rejectWithCleanup(
+        `${file.filename}: ${validation.ok ? "File type does not match." : validation.reason}`
       );
     }
+    let blob: Awaited<ReturnType<typeof head>>;
+    try {
+      blob = await head(file.pathname);
+    } catch (error) {
+      if (error instanceof BlobNotFoundError) {
+        return rejectWithCleanup(`${file.filename}: Upload not found.`);
+      }
+      throw error;
+    }
+    if (
+      blob.size !== file.size ||
+      blob.size > MAX_FILE_BYTES ||
+      blob.contentType !== validation.mimeType
+    ) {
+      return rejectWithCleanup(`${file.filename}: Uploaded file details do not match.`);
+    }
+    staged.push({
+      pathname: file.pathname,
+      filename: file.filename,
+      mimeType: validation.mimeType,
+      size: blob.size,
+    });
   }
 
   const deliverAt = new Date(Date.now() + DELIVERY_DELAY_MS);
@@ -140,11 +190,11 @@ export async function POST(req: Request) {
         body,
         deliverAt,
         attachments: {
-          create: staged.map((s, i) => ({
+          create: staged.map((s) => ({
             filename: s.filename,
             mimeType: s.mimeType,
             size: s.size,
-            storageKey: writtenKeys[i],
+            storageKey: s.pathname,
           })),
         },
       },
@@ -155,8 +205,7 @@ export async function POST(req: Request) {
       { status: 201 }
     );
   } catch {
-    // DB failed — delete the files we wrote so we don't leak orphans.
-    await Promise.all(writtenKeys.map(deleteFile));
+    await Promise.all(ownedPaths.map(deleteFile));
     return NextResponse.json(
       { error: "We couldn't send your letter. Please try again." },
       { status: 500 }

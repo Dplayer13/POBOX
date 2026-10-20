@@ -21,7 +21,7 @@ A private app where each person gets a unique, anonymous virtual PO box. People 
 - **Backend:** FastAPI + Postgres (Supabase optional, gives auth for free)
 - **Frontend:** installable web app (PWA), no app store
 - **Hosting:** Render
-- **File storage:** private object storage (Cloudflare R2, Supabase Storage, or S3). Never store files in Postgres.
+- **File storage:** private object storage (Vercel Blob). Never store files in Postgres.
 
 ## Data model
 - `users`: id, phone, created_at
@@ -40,12 +40,13 @@ Design `body` so it can later hold ciphertext without a rewrite.
 
 ## Files
 - Bucket is private. No public links.
-- Flow: app asks server to upload, server checks size and type, then gives a short-lived upload URL, and the file goes straight to storage.
-- Download: server first checks the user is the letter's sender or recipient, then gives a link that expires in a few minutes.
+- Flow: the server authenticates the sender, checks size and type, and issues a short-lived client upload token. The browser uploads directly to private Vercel Blob so files bypass Vercel Functions' 4.5 MB request limit. The letter request contains only the uploaded Blob pathnames and metadata.
+- Download: the server first checks the user is the letter's sender or recipient, then streams the private Blob through the authorized download route.
 - Limits from day one: e.g. 10 MB per file, 5 files per letter.
 - Allow a list of types (images, PDF, docx, audio). Block executables.
 - Store files under random keys, not original names.
 - Scan uploads for malware if possible, and never open or render them on the server.
+- Deployment requires a private Blob store connected to the Vercel project and its `BLOB_READ_WRITE_TOKEN` environment variable. Keep the token in Vercel's environment settings, never in source control.
 
 ## Server-side security rules (not just UI)
 - Every query filters by the logged-in user's box:

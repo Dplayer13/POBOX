@@ -12,24 +12,18 @@ import {
   Loader2,
   ArrowRight,
 } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { isValidBoxId } from "@/lib/box";
+import {
+  MAX_BODY_CHARS,
+  MAX_FILE_BYTES,
+  MAX_FILES_PER_LETTER,
+  validateFile,
+} from "@/lib/file-types";
 import { cn } from "@/lib/utils";
 import type { LetterDetail } from "@/lib/types";
 
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
-const MAX_FILES = 5;
-const MAX_BODY_CHARS = 10000;
-const ALLOWED_EXT = new Set([
-  "jpg", "jpeg", "png", "gif", "webp", "pdf", "docx", "doc", "txt",
-  "mp3", "wav", "ogg", "oga", "m4a",
-]);
-
-function extOf(name: string) {
-  const i = name.lastIndexOf(".");
-  return i < 0 ? "" : name.slice(i + 1).toLowerCase();
-}
 function humanSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -72,18 +66,22 @@ export function Compose({
     if (!list) return;
     const next: StagedFile[] = [];
     for (const f of Array.from(list)) {
-      if (files.length + next.length >= MAX_FILES) {
+      if (files.length + next.length >= MAX_FILES_PER_LETTER) {
         toast({
           title: "Too many files",
-          description: `You can attach at most ${MAX_FILES} files per letter.`,
+          description: `You can attach at most ${MAX_FILES_PER_LETTER} files per letter.`,
         });
         break;
       }
-      const ext = extOf(f.name);
-      let err: string | undefined;
-      if (f.size > MAX_FILE_BYTES) err = "Exceeds the 10 MB limit";
-      else if (!ALLOWED_EXT.has(ext)) err = "Type not allowed";
-      next.push({ file: f, error: err });
+      const validation = validateFile({
+        name: f.name,
+        type: f.type,
+        size: f.size,
+      });
+      next.push({
+        file: f,
+        error: validation.ok ? undefined : validation.reason,
+      });
     }
     setFiles((prev) => [...prev, ...next]);
   }
@@ -95,9 +93,15 @@ export function Compose({
   async function submit() {
     if (!canSend) return;
     setSubmitting(true);
+    const uploaded: Awaited<ReturnType<typeof api.uploadFile>>[] = [];
+    let sent = false;
     try {
       const goodFiles = files.filter((f) => !f.error).map((f) => f.file);
-      const letter = await api.send(recipientNorm, body, goodFiles);
+      for (const file of goodFiles) {
+        uploaded.push(await api.uploadFile(myBoxId, file));
+      }
+      const { letter } = await api.send(recipientNorm, body, uploaded);
+      sent = true;
       // Both lists may change (sent always; inbox if they self-addressed).
       qc.invalidateQueries({ queryKey: ["letters"] });
       toast({
@@ -106,7 +110,14 @@ export function Compose({
       });
       onSent(letter);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : "Couldn't send your letter.";
+      let msg = e instanceof Error ? e.message : "Couldn't send your letter.";
+      if (!sent && uploaded.length > 0) {
+        try {
+          await api.deleteUploads(uploaded.map((file) => file.pathname));
+        } catch {
+          msg += " Some uploaded files could not be cleaned up.";
+        }
+      }
       toast({ title: "Couldn't send", description: msg, variant: "destructive" });
     } finally {
       setSubmitting(false);
@@ -187,13 +198,15 @@ export function Compose({
             type="button"
             onClick={() => fileInput.current?.click()}
             className="inline-flex items-center gap-2 rounded-md border border-border/60 bg-card/70 px-3 py-1.5 text-sm text-foreground transition-colors hover:bg-secondary/60 disabled:opacity-50"
-            disabled={files.length >= MAX_FILES}
+            disabled={files.length >= MAX_FILES_PER_LETTER}
           >
             <Paperclip size={14} />
             Attach a file
           </button>
           <span className="text-xs text-muted-foreground">
-            Up to {MAX_FILES} · 10 MB each · images, PDF, docx, txt, audio
+            Up to {MAX_FILES_PER_LETTER} ·{" "}
+            {MAX_FILE_BYTES / (1024 * 1024)} MB each · images, PDF, docx, txt,
+            audio
           </span>
           <input
             ref={fileInput}
@@ -266,7 +279,11 @@ export function Compose({
           ) : (
             <Send size={16} />
           )}
-          {submitting ? "Sealing…" : "Seal & send"}
+          {submitting
+            ? hasFiles
+              ? "Uploading & sealing…"
+              : "Sealing…"
+            : "Seal & send"}
         </motion.button>
       </div>
     </div>

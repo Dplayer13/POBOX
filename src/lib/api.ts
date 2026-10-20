@@ -4,6 +4,8 @@ import type {
   LetterListItem,
   LetterDetail,
 } from "@/lib/types";
+import { upload as uploadToBlob } from "@vercel/blob/client";
+import { extOf, validateFile } from "@/lib/file-types";
 
 const TOKEN_KEY = "pobox_token";
 
@@ -15,6 +17,13 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+export interface UploadedAttachment {
+  pathname: string;
+  filename: string;
+  mimeType: string;
+  size: number;
 }
 
 /** localStorage-backed session token (survives cross-origin preview iframes
@@ -109,14 +118,52 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ opened: true }),
     }),
-  send: (recipientBoxId: string, body: string, files: File[]) => {
-    const fd = new FormData();
-    fd.set("recipientBoxId", recipientBoxId);
-    fd.set("body", body);
-    for (const f of files) fd.append("files", f);
+  uploadFile: async (boxId: string, file: File): Promise<UploadedAttachment> => {
+    const validation = validateFile({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+    });
+    if (!validation.ok) {
+      throw new ApiError(`${file.name}: ${validation.reason}`, 400);
+    }
+    const pathname =
+      `letters/${boxId}/${crypto.randomUUID().replace(/-/g, "")}.${extOf(file.name)}`;
+    const token = getStoredToken();
+    const blob = await uploadToBlob(pathname, file, {
+      access: "private",
+      contentType: validation.mimeType,
+      handleUploadUrl: "/api/uploads",
+      clientPayload: JSON.stringify({
+        filename: file.name,
+        type: validation.mimeType,
+        size: file.size,
+      }),
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      multipart: file.size > 5 * 1024 * 1024,
+    });
+    return {
+      pathname: blob.pathname,
+      filename: file.name,
+      mimeType: blob.contentType,
+      size: file.size,
+    };
+  },
+  deleteUploads: (pathnames: string[]) =>
+    apiFetch<void>("/api/uploads", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pathnames }),
+    }),
+  send: (
+    recipientBoxId: string,
+    body: string,
+    files: UploadedAttachment[]
+  ) => {
     return apiFetch<{ letter: LetterDetail }>("/api/letters", {
       method: "POST",
-      body: fd,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recipientBoxId, body, files }),
     });
   },
 };
